@@ -18,6 +18,7 @@ public class WeatherStub implements AutoCloseable {
     private final CountDownLatch release = new CountDownLatch(1);
     private final AtomicInteger requests = new AtomicInteger();
     private volatile boolean stalled;
+    private volatile boolean failed;
 
     public WeatherStub(boolean stall) throws IOException {
         stalled = stall;
@@ -36,9 +37,9 @@ public class WeatherStub implements AutoCloseable {
         requests.incrementAndGet();
         try { if (stalled) release.await(5, TimeUnit.SECONDS); }
         catch (InterruptedException error) { Thread.currentThread().interrupt(); }
-        byte[] body = payload().getBytes(StandardCharsets.UTF_8);
+        byte[] body = body().getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json");
-        exchange.sendResponseHeaders(200, body.length);
+        exchange.sendResponseHeaders(failed ? 500 : 200, body.length);
         try (var output = exchange.getResponseBody()) { output.write(body); }
     }
 
@@ -48,6 +49,15 @@ public class WeatherStub implements AutoCloseable {
 
     public void stall() {
         stalled = true;
+    }
+
+    /** Make subsequent responses echo a test credential in a provider failure body. */
+    public void fail() {
+        failed = true;
+    }
+
+    private String body() {
+        return failed ? "{\"error\":{\"message\":\"private-trace-test-key\"}}" : payload();
     }
 
     public int requests() {

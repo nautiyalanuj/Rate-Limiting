@@ -256,6 +256,13 @@ Resilience4j manages circuit state safely and permits one half-open probe. Its s
 
 This is an **in-memory, single-process** example. A restart resets quotas and circuits; multiple application instances each have their own quotas. A cluster-wide rate limiter would need shared storage such as Redis. A rate limiter regulates frequency; it is not a concurrency/bulkhead limit for in-flight calls. Those are useful next steps beyond this learning project.
 
+## Optional local metrics, dashboards, tracing, and storage
+
+Prometheus/Grafana metrics and OpenTelemetry traces are disabled by default. An opt-in
+Docker Compose stack provides a dashboard, persistent trace storage in Tempo, and optional
+local PostgreSQL. See [local setup and flags](ops/README.md) for independent feature flags,
+startup commands, data retention, and PostgreSQL storage setup.
+
 ## 9. Optional PostgreSQL profile
 
 The default demo requires no database installation. To use an existing PostgreSQL server, create the table in the selected database:
@@ -335,9 +342,119 @@ No test calls the real weather API or requires PostgreSQL. Limiter and breaker t
 - **No coverage page after `test`:** the report is generated in the `verify` phase, not merely `test`.
 - **PostgreSQL startup fails:** confirm the server, credentials, selected database, and `users` schema; the default demo profile avoids these requirements.
 
+## 12. Use the same protections through MCP
+
+The application also runs a Model Context Protocol (MCP) server at **`http://127.0.0.1:8080/mcp`**. MCP clients discover tools and invoke them over the supported **stateless Streamable HTTP** transport. This is a real MCP endpoint, with protocol negotiation and tool schemas, rather than a collection of REST endpoints renamed as tools.
+
+Start it with the same command:
+
+```bash
+./mvnw spring-boot:run
+```
+
+No AI model subscription or model-provider key is required to run the MCP server. `get_weather` still requires `WEATHER_API_KEY` for actual weather data.
+
+### Available tools
+
+| Tool | Arguments | Behavior |
+| --- | --- | --- |
+| `list_rate_limiters` | None | Read every configured policy's name, algorithm, capacity and period. Does not consume a permit. |
+| `try_acquire_rate_limit` | `policy`: configured name | Attempt to consume one permit. Returns `allowed` and `retryAfterSeconds`; does not call a dependency. |
+| `list_circuit_breakers` | None | Read all named circuit states without running a recovery probe. |
+| `get_circuit_breaker` | `name`: `weather`, `database`, or `demo` | Inspect one circuit without changing its state. |
+| `get_weather` | `city`: nonblank string | Use the shared weather quota, then the existing weather service and circuit. |
+| `list_users` | None | Use the shared users quota, then the existing user repository and database circuit. |
+| `test_circuit_breaker` | `fail`: boolean | **Demo profile only.** Simulate failure (`true`) or success (`false`) through the demo quota and circuit. |
+
+**REST and MCP share the same objects and state.** For example, `try_acquire_rate_limit` with `policy="fixed-demo"` spends one of the three permits available to `GET /demo/fixed`. Likewise, opening the demo circuit from MCP makes REST demo calls fail fast. Do not call `try_acquire_rate_limit` before `get_weather` to preauthorize it: `get_weather` already acquires its own permit, so that would spend twice.
+
+Stateless describes the **transport**, not the application quotas. Rate-limit and circuit state remain shared in memory across requests until the app restarts. Inspecting policies or circuits does not consume quota. MCP tool declarations mark inspection as read-only and permit-spending calls as non-idempotent.
+
+The MCP endpoint uses functional routing, which does not run controller annotation enforcement. `McpToolRunner.guarded()` therefore explicitly checks the existing registry **before** invoking a service. The circuit remains in the service, preserving the same rate-limit-before-circuit order as REST.
+
+### Connect a client
+
+Use a native client that supports Streamable HTTP, with server URL `http://127.0.0.1:8080/mcp`. For clients whose configuration accepts an `mcpServers` map with a URL, the entry is:
+
+```json
+{
+  "mcpServers": {
+    "rate-limiting-demo": {
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}
+```
+
+Client configuration formats vary; select Streamable HTTP in clients that require an explicit transport choice. The MCP test suite uses the official Java SDK to verify initialization, discovery and invocation over a real HTTP connection.
+
+To inspect the wire protocol using curl, initialize a connection:
+
+```bash
+curl -sS http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl-demo","version":"1.0"}}}'
+```
+
+Send the initialized notification, then discover tools. Use the protocol version returned by initialization for subsequent requests; these examples request `2025-11-25`:
+
+```bash
+curl -sS http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+curl -sS http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+```
+
+Invoke the rate-limiter tool:
+
+```bash
+curl -sS http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"try_acquire_rate_limit","arguments":{"policy":"token-demo"}}}'
+```
+
+The result includes both text content and structured JSON. Successful operations put their output under `structuredContent.data`. A denied explicit permit attempt is a successful tool result containing `allowed=false`; the caller can inspect its retry hint. A protected dependency call rejected by a quota instead returns `isError=true` with code `RATE_LIMITED` and a positive `retryAfterSeconds`.
+
+Other safe error codes are `CIRCUIT_OPEN`, `WEATHER_NOT_CONFIGURED`, `INVALID_ARGUMENT`, and `DEPENDENCY_UNAVAILABLE`. Zero retry seconds on non-quota errors means no precise retry delay is supplied. MCP tool failures use MCP result semantics, typically HTTP 200 with `isError=true`, rather than the REST 429/503 status format. Raw SQL, provider URLs, credentials and exception messages are never passed through the tool adapter.
+
+### Configuration, access and tests
+
+MCP is configured in `application.properties`:
+
+```properties
+spring.ai.mcp.server.protocol=STATELESS
+spring.ai.mcp.server.type=SYNC
+spring.ai.mcp.server.streamable-http.mcp-endpoint=/mcp
+```
+
+Set `spring.ai.mcp.server.enabled=false` to disable the MCP transport. Spring AI 2.0.1 uses the `streamable-http.mcp-endpoint` property for its stateless transport too; this is verified by the custom-endpoint integration test. Changing the endpoint also changes the origin filter's protected path. The new `mcp` package contains adapters, safe result conversion, quota admission and the origin filter; existing algorithms and circuit state are reused.
+
+The application now binds to **`127.0.0.1` by default**, keeping this unauthenticated teaching server local. The MCP path rejects requests carrying an `Origin` header; native clients and curl normally omit it. Browser-based connections are intentionally blocked. REST routes continue to use their existing behavior. If deploying remotely, provide authentication and an explicit origin policy before overriding `server.address`; the starter does not supply an authentication boundary automatically.
+
+Run MCP tests independently:
+
+```bash
+./mvnw -Dtest=McpProtocolTests,McpCircuitProtocolTests,McpProductionProfileTests,McpToolUnitTests test
+```
+
+These tests exercise a real initialized SDK client, tool discovery and required input schemas, cross-interface shared quotas, concurrent admission, retry advice, safe errors, circuit opening, rejection of browser origins, a custom MCP endpoint, and hiding the failure-simulation tool outside the demo profile. The complete `./mvnw clean verify` build includes MCP tests and the same source-size and coverage checks.
+
+
 ## References
 
 - [Weatherly quick start](https://weatherly.readthedocs.io/en/latest/quickstart.html): identifies the underlying provider.
 - [WeatherAPI documentation](https://www.weatherapi.com/docs/): endpoint, parameters, payload and error codes.
 - [Resilience4j circuit breaker](https://resilience4j.readme.io/docs/circuitbreaker): state machine and configuration.
 - [JaCoCo Maven plugin](https://www.jacoco.org/jacoco/trunk/doc/maven.html): coverage reports and verification.
+- [Spring AI MCP server](https://docs.spring.io/spring-ai/reference/api/mcp/mcp-stateless-server-boot-starter-docs.html): supported stateless HTTP transport.
+- [MCP annotations](https://docs.spring.io/spring-ai/reference/api/mcp/mcp-annotations-server.html): tool discovery, schemas and hints.

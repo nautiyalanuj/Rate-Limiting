@@ -31,6 +31,7 @@ class WeatherTransportTests {
 
     private WeatherClient client(WeatherStub stub, Duration timeout) {
         WeatherProperties settings = new WeatherProperties(stub.baseUrl(), "local-test-key", Duration.ofSeconds(2), timeout);
-        return new WeatherClient(new WeatherHttpConfiguration().weatherRestClient(settings), settings);
+        return new WeatherClient(new WeatherHttpConfiguration().weatherRestClient(settings,
+                org.springframework.web.client.RestClient.builder()), settings);
     }
 }

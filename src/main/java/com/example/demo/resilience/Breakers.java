@@ -5,6 +5,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import java.util.Map;
+import java.util.stream.Collectors;
 import java.time.Clock;
 import org.springframework.beans.factory.annotation.Autowired;
 import java.util.function.Supplier;
@@ -55,8 +56,15 @@ public class Breakers {
     }
 
     private CircuitBreaker instance(String name) {
+        if (name == null) throw new IllegalArgumentException("A circuit breaker name is required");
         CircuitBreaker breaker = instances.get(name);
         if (breaker == null) throw new IllegalArgumentException("Unknown circuit breaker: " + name);
         return breaker;
+    }
+
+    /** @return a snapshot of dependency states without executing any recovery probes */
+    public Map<String, String> states() {
+        return instances.entrySet().stream().collect(Collectors.toUnmodifiableMap(
+                Map.Entry::getKey, entry -> entry.getValue().getState().name()));
     }
 }
