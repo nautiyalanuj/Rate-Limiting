@@ -26,8 +26,18 @@ public final class TokenBucketLimiter implements RateLimitStrategy {
     public synchronized LimitDecision tryAcquire() {
         refill(clock.getAsLong());
         if (tokens < 1) return LimitDecision.deny((long) Math.ceil((1 - tokens) / refillRate()));
+        simulateDelay();
         tokens--;
+        System.out.println("Tokens after decrement: " + tokens);
         return LimitDecision.permit();
+    }
+
+    private void simulateDelay() {
+        try {
+            Thread.sleep(100); // Hold the monitor during the concurrency experiment.
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private void refill(long now) {
