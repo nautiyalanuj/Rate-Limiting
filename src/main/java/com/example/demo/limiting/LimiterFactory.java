@@ -15,8 +15,11 @@ public final class LimiterFactory {
     public static RateLimitStrategy create(RateLimitPolicy policy, LongSupplier clock) {
         return switch (policy.algorithm()) {
             case FIXED_WINDOW -> new FixedWindowLimiter(policy, clock);
-            case SLIDING_WINDOW -> new SlidingWindowLimiter(policy, clock);
-            case TOKEN_BUCKET -> new TokenBucketLimiter(policy, clock);
+            //case SLIDING_WINDOW -> new SlidingWindowLimiter(policy, clock);
+            //case TOKEN_BUCKET -> new TokenBucketLimiter(policy, clock);
+            case SLIDING_WINDOW -> new SlidingWindowLimiterv2(policy, clock);
+            case TOKEN_BUCKET -> new TokenBucketLimiterv2(policy, clock);
+            default -> throw new IllegalArgumentException("Unsupported algorithm: " + policy.algorithm());
         };
     }
 }
